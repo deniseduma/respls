@@ -1,0 +1,223 @@
+#!/usr/bin/Rscript
+
+
+rm(list=ls())
+setwd(".")
+print(getwd())
+
+library(multicore)
+
+source("nrm.r")
+source("runParallelSPLS3.r")
+source("runParallelRESPLS3.r")
+
+method = "spls" #"spls"
+
+outdir = "sim3/"
+
+npcs = 1; n=40; p=100; q=1; yprop = 0
+mu1 = c(rep(-2, n/2), rep(2, n/2))
+mu2 = c(rep(-1, n/4), rep(1, n/4), rep(-1, n/4), rep(1, n/4))
+
+p1 = 20; p2 = 5
+
+# Ground truth
+v1 = c(rep(1,p1), rep(0, p-p1))
+v2 = c(rep(0, p1), rep(1, p2), rep(0, p-p1-p2))
+v1 = v1/norm(v1) 
+v2 = v2/norm(v2)
+V0 = cbind(v2)
+
+# Build Laplacian on genes 201-250
+D <- matrix(0, p, p)
+A <- matrix(0, p, p)
+A[(p1+1):(p1+p2), (p1+1):(p1+p2)] <- 1 
+diag(A) <- 0
+diag(D)[(p1+1):(p1+p2)] <- p2 - 1
+L <- D - A
+#d <- diag(D)
+#d[d>0] <- 1/sqrt(d[d>0])
+#L <- Diagonal(p, d) %*% L %*% Diagonal(p, d)
+## Placeholder Laplacian
+L=diag(p)
+
+nlam = 500
+num_iter = 1
+if (method=="spls") {
+	res <- mclapply(1:num_iter, function(i) runParallelSPLS3(i,n,p,yprop,mu1,mu2,npcs,V0), mc.preschedule=FALSE, mc.cores = 10)
+} else if (method=="respls") {
+	res <- mclapply(1:num_iter, function(i) runParallelRESPLS3(i,n,p,yprop,mu1,mu2,npcs,nlam,V0,L), mc.preschedule=FALSE, mc.cores = 10)
+}
+print("str(res)")
+print(str(res))
+
+#res=res[-(which(sapply(res,is.null),arr.ind=TRUE))]
+res = res[lapply(res, length) != 0]
+if (length(res)==0)
+	stop("No results!")
+num_iter = length(res)
+print("length(res)")
+print(length(res))
+
+roc_fpr = matrix(0, npcs, nlam)
+roc_tpr = matrix(0, npcs, nlam)
+roc_fpr2 = matrix(0, npcs, num_iter)
+roc_tpr2 = matrix(0, npcs, num_iter)
+
+
+if (method=="respls") {
+for (i in 1:num_iter) {
+	crt = res[[i]]
+	for (j in 1:npcs) { 
+		for (l in 1:nlam) {
+			roc_fpr[j,l] = roc_fpr[j,l] + crt$fpr[j, l]
+			roc_tpr[j,l] = roc_tpr[j,l] + crt$tpr[j, l]
+		}
+	}
+}	
+}
+roc_fpr = roc_fpr / num_iter;
+roc_tpr = roc_tpr / num_iter;
+
+for (i in 1:num_iter) {
+	crt = res[[i]]
+	for (j in 1:npcs) { 
+		roc_fpr2[j,i] = crt$fpr2[j]
+		roc_tpr2[j,i] = crt$tpr2[j]
+	}
+}
+
+# tvar
+if (method=="respls") {
+tvar = matrix(0, num_iter, q)
+for (i in 1:num_iter) {
+	crt = res[[i]]
+	tvar[i, ] = crt$var
+}
+avgs_tvar = numeric(q)
+sds_tvar = numeric(q)
+for (j in 1:q) { 
+	avgs_tvar[j] = mean(tvar[ ,j])
+	sds_tvar[j] = sd(tvar[ ,j])
+}
+cat("\n")
+print("avgs_tvar")
+print(avgs_tvar)
+print("sds_tvar")
+print(sds_tvar)
+}
+
+# MSPE
+mspe = matrix(0, num_iter, q)
+for (i in 1:num_iter) {
+	crt = res[[i]]
+	mspe[i, ] = crt$mspe
+}
+avgs_mspe = numeric(q)
+sds_mspe = numeric(q)
+for (j in 1:q) { 
+	avgs_mspe[j] = mean(mspe[ ,j])
+	sds_mspe[j] = sd(mspe[ ,j])
+}
+cat("\n")
+print("avgs_mspe")
+print(avgs_mspe)
+print("sds_mspe")
+print(sds_mspe)
+
+elapsed = 0
+for (i in 1:num_iter) {
+	crt = res[[i]]
+	elapsed <- elapsed + crt$elapsed
+}
+elapsed = elapsed/num_iter
+cat("\n")
+print(paste("execution time ", round(elapsed[3], 4), sep=""))
+
+
+cat("\n")
+csplit = 0
+for (i in 1:num_iter) {
+	crt = res[[i]]
+	csplit = csplit + crt$csplit
+}
+csplit = csplit / num_iter
+print(paste("csplit ",csplit,sep=""))
+
+cat("\n")
+t_fpr = 0
+for (i in 1:num_iter) { 
+	crt = res[[i]]
+	t_fpr = t_fpr + crt$t_fpr
+}	
+t_fpr = t_fpr / num_iter
+print(paste("t_fpr ",t_fpr,sep=""))
+
+if (method=="respls") {
+cpev = numeric(npcs)
+for (i in 1:num_iter) {
+	for (j in 1:npcs) { 
+		crt = res[[i]]
+		cpev[j] = cpev[j] + crt$cpev[j]
+	}
+}	
+cpev = cpev / num_iter
+cat("\n")
+print("cpev")
+print(round(cpev, 4))
+}
+
+if (method=="respls") {
+#cat("\n")
+#print("fpr and tpr")
+#for (j in 1:npcs) { 
+	#print(paste("roc_fpr[", j, "]", sep=""))
+	#print(roc_fpr[j, ])
+	#print(paste("roc_tpr[", j, "]", sep=""))
+	#print(roc_tpr[j, ])
+#}
+}
+
+avgs_tpr = numeric(npcs)
+avgs_fpr = numeric(npcs)
+sds_tpr = numeric(npcs)
+sds_fpr = numeric(npcs)
+for (j in 1:npcs) { 
+	avgs_tpr[j] = mean(roc_tpr2[j,])
+	avgs_fpr[j] = mean(roc_fpr2[j,])
+	sds_tpr[j] = sd(roc_tpr2[j,])
+	sds_fpr[j] = sd(roc_fpr2[j,])
+}
+
+cat("\n")
+print("avgs_tpr")
+print(avgs_tpr)
+print("avgs_fpr")
+print(avgs_fpr)
+print("sds_tpr")
+print(sds_tpr)
+print("sds_fpr")
+print(sds_fpr)
+
+#ma = matrix(0,npcs,num_iter)
+#for (i in 1:num_iter) {
+#	crt = res[[i]]
+#	for (j in 1:npcs) 
+#		ma[j,i] = crt$ma_angle[j]
+#}		
+#cat("\n")
+#for (j in 1:npcs) {
+#	print(paste("Median angle for pc ", j, sep=""))
+#	print(median(ma[j, ]))
+#}
+
+#Plot ROC curves for each PC
+if (method=="respls") {
+for (j in 1:npcs) { 
+	pdf(paste("pc", j,"_roc.pdf",sep=""))
+	plot(roc_fpr[j, ], roc_tpr[j, ], cex=1, pch=16, type="l", xlim=c(0, 0.001), ylim=c(0,1), xlab ="FPR", ylab="TPR", main=paste("ROC curve PC", j,sep=""), cex.lab=1, cex.axis=1)
+	points(roc_fpr[j, ], roc_tpr[j, ])
+	dev.off() 
+}
+}
+

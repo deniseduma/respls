@@ -1,0 +1,56 @@
+function [U, V1, M1, V2, M2] = cc_wrapper_multi(X1, cnameX1, vnameX1, X2, cnameX2, vnameX2, dist1, dist2, algo, k)
+  
+  whos X1
+  whos X2
+  r1 = rank(X1)
+  r2 = rank(X2)
+  
+  [n, d1] = size(X1); 
+  [n, d2] = size(X2);
+  
+  comps = [];
+  for i=1:k
+	comps = strvcat(comps, int2str(i));
+  end
+  vname2 = strvcat('ID', comps);
+
+   %HO GSVD init
+   X1 = log(1 + X1);
+   X2 = log(1 + X2);
+   
+   A1 = X1 * X1'; 
+   A2 = X2 * X2';
+   [a1, a2] = size(A1)
+   r1 = rank(A1)
+   [b1, b2] = size(A2)
+   r2 = rank(A2)
+   I1 = pinv(A1); %I1 = A1 \ eye(n); 
+   I2 = pinv(A2); %I2 = A2 \ eye(n);
+   
+   S = 1/2 * (A1 * I2 + A2 * I1);
+   [U, D] = eig(S);
+   U = U(:, 1:k); 
+   %[U, D, V] = svds(S, k);
+   
+   B1 = X1' * U;
+   B2 = X2' * U;
+
+   S1 = diag(sqrt(diag(B1' * B1)));
+   S2 = diag(sqrt(diag(B2' * B2)));
+   
+   V1 = B1 * diag(1 ./ diag(S1));
+   V2 = B2 * diag(1 ./ diag(S2));
+   
+   M1 = zeros(n, 1); M2 = zeros(n, 1); 
+   
+   %call exppca
+   [U, V1, M1, V2, M2] = exppca_multi(algo, k, X1, X2, U, V1, M1, V2, M2);
+
+   %principal components scatter plot	
+   plotScatter(U, k, 'IPCA(X)');
+
+   %write csv to file
+   writeCSV(U, cnameX1, vname2, 'U_Multi_CT');
+   writeCSV(V1, vnameX1, vname2, 'V1_Multi_CT');
+   writeCSV(V2, vnameX2, vname2, 'V2_Multi_CT');
+    

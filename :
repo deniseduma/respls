@@ -1,0 +1,325 @@
+library(MASS)
+library(rdetools)
+
+source("update_v.r")
+source("update_w.r")
+
+#rad2deg <- function(rad) {(rad * 180) / (pi)}
+#deg2rad <- function(deg) {(deg * pi) / (180)}
+alpha1 = 0.2
+alpha2 = 0.8
+angle = (45 * pi) / (180)
+maxit = 100
+eps = 1e-3
+rho_v = 1
+rho_w = 1
+
+DEBUG <- 0
+
+opt <- function(X, Y, L,S,invS,nrmS,npcs,nlam,outdir) {
+
+	n = nrow(X)
+	p = ncol(X)
+	q = ncol(Y)
+
+	# Center X
+	one = rep(1, n)
+	meanx = drop(one %*% X) / n
+	names(meanx) = NULL
+	X = scale( X, meanx, F )
+	# Center Y
+	meany = drop(one %*% Y) / n
+	names(meany) = NULL
+    	Y = scale( Y, meany, F )
+	# Scale X
+	normx = sqrt( drop( one %*% (X^2) ) / (n-1) )
+	names(normx) = NULL
+	X = scale(X, F, normx)
+	# Scale Y
+	normy = sqrt( drop( one %*% (Y^2) ) / (n-1) )
+	names(normy) = NULL
+        Y = scale( Y, F, normy )
+	
+	X0 = X; Y0 = Y
+	# Data matrix
+	YtX <- YtX0 <- crossprod(Y0, X0)
+	K <- crossprod(YtX0)
+	# Total variance to be explained
+	tvar <- sum( diag ( crossprod(YtX0) ) )
+	
+	# CPEV by PCs
+	r = svd(YtX0)
+	d2 = r$d^2
+	sd2 = sum(d2)
+	ld2 = length(d2)
+	var = numeric(ld2)
+	for (j in 1:ld2)
+		var[j] = sum(d2[1:j]) / sd2
+	cat("\n")
+	print("dim(r$u)")
+	print(dim(r$u))
+	print("dim(r$v)")
+	print(dim(r$v))
+	print("length(r$d)")
+	print(length(r$d))
+	
+	stop <- FALSE
+	#idx_t <- rep(FALSE, p)
+	cpev <- numeric(npcs)
+	V <- W <- W2 <- NULL
+	bW <- matrix(0, p, npcs*nlam)
+	
+	# Speedup w update
+	M_w = L + diag(p); res = factor_w(M_w); L_w0 = res$L; U_w0 = res$U
+	
+	for (k in 1:npcs) {
+		cat("\n\n")
+		print(paste("PC",k,sep=""))
+	
+		## Init v
+		r = svd(YtX); v = v0 = r$v[, 1]
+		y = y0 = YtX%*%v; Xty = Xty0 = t(YtX)%*%y
+		
+		## Generate lambda sequence
+		max_lam = max(abs(Xty)) / alpha1
+		lambdas = exp(seq(from=log(0.9*max_lam),to=log(1e-3*max_lam),length.out=nlam))
+		print("lambdas")
+		print(lambdas[c(1, length(lambdas))])
+
+		# Speedup w update
+		#Z = t(YtX)
+		#my_mz = backsolve(U_w0, forwardsolve(L_w0, Z))
+						
+		# Speedup v update
+		## Method 1: Cholesky decomposition
+		#M_v = K + rho_v*diag(p)
+		#res = factor_v(M)
+		#L_v = res$L 
+		#U_v = res$U
+		## Method 2: Woodbury formula
+		#Vhat <- D <- NULL
+		#invM_v = diag(p) - t(YtX) %*% solve( diag(q) + YtX %*% t(YtX) ) %*% YtX
+		#if (!is.null(V)) {
+		#	Vhat = invM_v %*% V
+		#	D = t(Vhat) %*% V
+		#}
+		## Method 3: Woodbury formula fast 
+		my_MV = my_VMV = NULL
+		if (!is.null(V)) {
+			my_W = solve( diag(q) + YtX %*% t(YtX), YtX %*% V )
+			my_MV = V - t(YtX) %*% my_W
+			my_VMV = t(my_MV) %*% V
+		}
+		
+		w = u_w = u_v = oldw = NULL
+		vs = matrix(0, nrow=p, ncol=nlam)
+		ws = matrix(0, nrow=p, ncol=nlam)
+		ys = matrix(0, nrow=q, ncol=nlam)
+		for (j in 1:nlam) { 
+
+			lam = lambdas[j]; lam1 = alpha1*lam; lam2 = alpha2*lam  
+
+			# Speedup w update
+			L_w = sqrt(lam2) * L_w0; U_w = sqrt(lam2) * U_w0
+			#my_mz = (1/lam2) * my_mz
+			#my_zmz = diag(q) +  t(my_mz)%*%Z
+
+			# Warm start
+			v = v0; y = y0; Xty = Xty0
+			#w = oldw = u_w = u_v = NULL
+			indw = 1; iter = 1; 
+			while (iter<maxit) {
+
+				# update w
+				res = update_w(YtX, y, Xty, K, L, S, invS, nrmS, L_w, U_w, NULL, NULL, w, NULL, lam2, lam1, lam2) 
+				w = res$z; u_w = res$u
+				
+				if (norm(w) == 0) {
+					oldw = w
+					break
+				}	
+
+				# Test stop condition 
+				w2 <- w / norm(w)
+				if (!is.null(oldw)) { 
+					indw = norm(w2 - oldw)
+					if (DEBUG)
+						print(paste("[opt]STOP condition ",indw,", nnz(w) ",length(which(w!=0)),sep=""))
+					if (indw<eps) {
+						oldw = w2
+						break
+					}	
+				}
+				oldw = w2
+				
+				# Update v
+				y = YtX %*% w; Xty = t(YtX) %*% y
+				res = update_v(YtX, y, Xty, K, V, L_v, U_v, invM_v, my_MV, my_VMV, v, NULL, rho_v)
+				v = res$z; u_v = res$u
+				
+				y = YtX %*% v; Xty = t(YtX) %*% y
+				
+				iter = iter + 1;
+			} #end while
+			#if (DEBUG) { 
+				print(paste("[opt]j=",j,", iter=",iter,", indw ",indw,", nnz(w)=",length(which(w!=0)),sep=""))
+				#print(paste("[opt]norm(w)=",norm(w),", norm(v)=", norm(v),", norm(v-w)=",norm(v-w),sep=""))
+			#}
+
+			if (norm(w) == 0)
+				next
+			
+			ws[ ,j] = w2
+			vs[ ,j] = v
+			ys[ ,j] = y
+
+		} #end for 		
+
+		# Select best w using BIC
+		cat("\n"); print("BIC")
+		idx_bic = 1; min_bic = 1e6; all_zero = 1
+		for (j in 1:nlam) { 
+			w = ws[ ,j]
+			idx_w = which(w!=0); nnz_w = length(idx_w)
+			if (nnz_w==0) 
+				next
+		
+			all_zero = 0 
+			
+			y = ys[ ,j]
+			sYtX = YtX[ ,idx_w,drop=FALSE]
+			# OLS re-estimation of w
+			sw = solve ( crossprod(sYtX) + 0.0001*diag(nnz_w), t(sYtX)%*%y)
+			w[idx_w] = sw
+			##errl = (norm(ys[ ,nlam] - YtX%*%ws[ ,nlam])^2) / (n)	
+			err = (norm(y - YtX%*%w)^2) / (q)
+
+			## df estimation
+			lam = lambdas[j]; lam2 = alpha2*lam
+			## Direct matrix inversion
+			DF = sYtX %*% solve( crossprod(sYtX) + lam2*L[idx_w, idx_w] + lam2*diag(nnz_w), t(sYtX))
+			## Cholesky decomposition
+			#M_lam = crossprod(sYtX) + lam2*L[idx_w, idx_w] + lam2*diag(nnz_w)
+			#res = factor_w(M_lam); L_lam = res$L; U_lam = res$U
+			#DF = backsolve(U_lam, forwardsolve(L_lam, t(sYtX)))
+			#DF = sYtX %*% DF
+			## Fast matrix inversion
+#			Z_lam = t(sYtX); M_lam = lam2*(L[idx_w, idx_w] + diag(nnz_w))
+#			res = factor_w(M_lam); L_lam = res$L; U_lam = res$U
+#			MZ_lam = backsolve(U_lam, forwardsolve(L_lam, Z_lam))
+#			D_lam = diag(q) +  t(MZ_lam)%*%Z_lam
+#			nu_lam = solve(D_lam, t(MZ_lam)%*%Z_lam)
+#			DF = backsolve(U_lam, forwardsolve(L_lam, Z_lam - Z_lam%*%nu_lam))
+#			DF = sYtX %*% DF
+			df =  sum(diag(DF)); dfterm = (log(q)/q)*df
+			
+			##bic = err/errl + (log(n)/n)*df
+			bic = log(err) + dfterm
+			print(paste("j=",j,", nnz=",nnz_w,", err=",err,", log(err)=",log(err),", dfterm=",dfterm, ", bic=",bic,sep=""))
+
+			if (bic<min_bic) {
+				idx_bic = j; min_bic = bic
+			}
+		}
+		
+		if (all_zero) {
+			print(paste("[opt]No non-zero found at PC ",k,sep=""))
+			break
+		}	
+
+		w = ws[ ,idx_bic]
+		v = vs[ ,idx_bic]
+		print(paste("best j=",idx_bic,", best nnz=",sum(w!=0),", best bic=",min_bic, sep=""))
+		print("nnz(w)")
+		print(which(w!=0))
+		
+		## Update V
+		V = cbind(V, v)
+		## Update W  
+		W = cbind(W, w)
+		## Update bW
+		bW[ ,((k-1)*nlam + 1):(k*nlam)] = ws
+		## Compute cpev
+		pW = W %*% ginv( crossprod(W) ) %*% t(W) 
+ 		cpev[k] = sum( diag( crossprod(YtX0%*%pW) ) ) / tvar
+		
+		## Update data matrix
+		prV = V %*% solve( crossprod(V) ) %*% t(V) 
+		YtX = YtX0 - YtX0 %*% prV
+		K = crossprod(YtX)
+	
+	} #end for k
+	
+	# Compute betapls
+	TT = X %*% W
+	P = ginv(crossprod(TT)) %*% t(TT) %*% X0 
+	Q = ginv(crossprod(TT)) %*% t(TT) %*% Y0
+	betapls = W%*%Q
+	
+	# DEBUG
+	print("VtV")
+	print(round(crossprod(V), 4))
+	
+	# Print reg paths
+	for (k in 1:ncol(W)) { 
+	
+		# Plot reg path
+		#s1 <- colSums(abs(ws))
+		#s1 <- s1/max(s1)
+		ws <- bW[, ((k-1)*nlam + 1):(k*nlam)]	
+		coefs <- t(ws)
+		coefs <- scale(coefs, FALSE, 1/normx)
+		
+		low <- min(coefs) - 0.01 * abs(min(coefs))
+		up <- max(coefs) + 0.01 * abs(max(coefs))
+		ylimit <- c(low, up)
+	
+		#dev.new()
+		pdf(paste(outdir, "pc",k,"_reg_path.pdf",sep=""))
+		plot(1:nlam, 1:nlam, xlab="Steps", ylab="Standardized coefficients", ylim=ylimit,  type="n", main = paste("Regularization path PC",k,sep=""))
+		for (l in 1:ncol(coefs)) {
+			if (sum(coefs[,l]!=0)!=0)
+				lines(1:nlam, coefs[,l], col = l, lty = 1)
+		}
+		
+		idx <- which(coefs[nlam,]!=0)
+		#sidx = sample(idx, (2/3)*length(idx))
+		axis(4, at = coefs[nlam, idx], labels = colnames(X)[idx], cex = 0.1, adj=0, las=3, mar=c(8,8,1,4))
+		abline(h = 0, lty = 3)
+		dev.off()
+
+		# write non-zero selected coeffs to file
+		idx <- which(W[,k]!=0)
+		writeLines(colnames(X)[idx], paste(outdir, "pc",k,"_coeffs.txt",sep=""))
+	}
+
+	object <- list(X=X0,Y=Y0,V=V,W=W,bW=bW,P=P,Q=Q,betapls=betapls,var=var,cpev=cpev,meanx=meanx,normx=normx,meany=meany,normy=normy)
+    	class(object) <- "respls"
+    	object
+
+}
+
+predict.respls <- function(obj, newX) {
+	
+	print("[predict.respls]dim(newX)")
+	print(dim(newX))
+
+	X <- obj$X
+	betapls <- obj$betapls
+	p <- ncol(X)
+	
+        if (is.null(newX)) {
+		pred <- X %*% betapls #+ matrix(1,nrow(X),1) %*% obj$meany
+		pred <- scale(pred, F, 1/obj$normy)
+		pred <- scale(pred, -obj$meany, F)
+	} else {	
+        	if ( ncol(newX)!=p){ stop("The dimension of test dataset is inapproprite!") }
+		newX <- scale( newX, obj$meanx, obj$normx )
+		pred <- newX %*% betapls #+ matrix(1,nrow(newX),1) %*% object$meany
+		pred <- scale(pred, F, 1/obj$normy)
+		pred <- scale(pred, -obj$meany, F)
+	}
+	
+	return(pred)
+}
+

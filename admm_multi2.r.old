@@ -1,0 +1,367 @@
+
+#ADMM splitting by features with lasso trick
+
+library("Matrix")
+library("rdetools")
+library("multicore")
+library("glmnet")
+source("sampleTPoints.r")
+
+QUIET <- T
+MAX_ITER <- 1000
+ABSTOL <- 1e-4
+RELTOL <- 1e-2
+
+NCORES <- 1 
+SSIZE <-0
+
+admm_multi2 <- function(X, K, Lapl, S, alpha, init_beta=NULL, p.ini, sselection, pcer, thr.range, sampleNo, sampleSize, savepath) {
+		
+	n <- nrow(X)
+	p.ini  <- p <- ncol(X)
+	
+	if (sselection) {
+		err <- pcer*p.ini
+		stop <- FALSE
+	}
+	
+	while (p%%NCORES!=0) {
+		NCORES <<- NCORES-1
+	}	
+	SSIZE <<- p/NCORES
+	print(paste("[lasso]NCORES ", NCORES, sep=""))
+	
+	rho <- 1
+	relaxpar <- 1.8
+
+	beta <- Matrix(0, nrow=SSIZE, ncol=NCORES)
+	if(!is.null(init_beta)) {
+		for (j in 1:NCORES) 
+			beta[ ,j] <- init_beta[((j-1)*SSIZE+1):(j*SSIZE)]
+	}
+
+	nlam1 <- 30
+	max_lam1 <- max(abs(K%*%alpha))
+	max_lam1 <- max_lam1/0.8
+	if (n>p){
+		min_lam1 <- 0.0001*max_lam1
+	} else {
+		#min_lam1 <- 0.01*max_lam1
+		min_lam1 <- 0.01*max_lam1
+	}
+	lambdas <- logspace(log10(min_lam1),log10(max_lam1),nlam1)
+	lambdas <- sort(abs(lambdas),decreasing=TRUE)
+	print("[admm]lambdas")
+	print(lambdas[c(1, length(lambdas))])
+	
+		
+	if (!sselection)
+		betas <- Matrix(0, nrow=p, ncol=length(lambdas))
+	
+	if(savepath) 
+		selprobpath <- Matrix(0, nrow=p,ncol=length(lambdas))
+	
+	if (sselection) {
+		qs <- numeric(length(lambdas))
+		thrall <- numeric(length(lambdas))
+		ls <- length(lambdas)
+	}
+	
+	X <- Matrix(X)
+	S <- Matrix(S)
+	alpha <- Matrix(alpha)
+	
+	#extended y
+	y <- X %*% alpha
+	y <- rbind2(y, Matrix(numeric(p)))
+
+	for(l in 1:length(lambdas)){
+		cat("\n")
+		print(paste('[', l, ']lambda=', lambdas[l],sep=""))
+		
+		lam1 <- 0.8*lambdas[l]
+		lam2 <- 0.2*lambdas[l]
+		#lam1 <- lam1/(n+p)
+		#lam2 <- lam2/(n+p)
+
+		#extended X
+		newX <- (1/sqrt(1+lam2)) * rbind2(X, sqrt(lam2)*t(S))
+		
+		#modified l1 penalty
+		gamma <- lam1 / sqrt(1+lam2)
+	
+		temp <- sss(newX,y,beta,gamma,lam2,rho,relaxpar,sselection,sampleNo,sampleSize)
+		
+		temp <- temp / sqrt(1+lam2)
+		
+		if (sselection==F) {
+			sp <- temp[ ,1] 
+			if (NCORES>1)
+				for (j in 2:NCORES) 
+					sp <- rbind2(sp, temp[ ,j])
+		} else {
+			t <- temp!=0
+			qs[l] <- mean(colSums(t))
+			sp <- rowMeans(t)
+			thrall[l] <- ((qs[l]^2/(err*p.ini))+1)/2
+			stable <- which(sp>=thrall[l])
+		}
+		
+		if (!sselection)
+			betas[,l] <- sp
+
+		if(savepath)
+			selprobpath[,l] <- sp
+				
+		if (sselection) {
+			if(thrall[l]>=thr.range[1]){
+				#if (length(stable)>0) {
+					print(paste("[admm]Within range, lambda=",lambdas[l],", qs=",qs[l],", thr=",thrall[l],sep=""))
+					print(paste("[admm]length(stable)=",length(stable),sep=""))
+					ls <- l
+					break
+				#}
+			}
+		}
+		
+		#warm start
+		beta <- temp
+	}#end for
+		
+	if (sselection) {
+		thr <- thrall[ls]
+		if(thr > thr.range[2]){
+			print(paste("[admm]Too big, lambda=",lambdas[ls],", qs=",qs[ls],", thr=",thrall[ls],sep=""))
+			while(pcer <= 0.5){
+				pcer <- pcer + 0.01	
+				thrall <- ((qs^2/((pcer*p.ini)*p.ini))+1)/2
+				thr <- thrall[ls]
+				if(thr < thr.range[2])break
+			}
+			print(paste("[admm]New PCER=", pcer,", new thr=", thr, sep=""))
+		}	 
+	
+		stable <- which(sp>=thr)
+		print(paste("[admm]New length(stable)=",length(stable),sep=""))
+		if(length(stable)==0) 
+			stop <- TRUE
+	
+		#Solve for beta
+		#FIXME solve for beta using the stable vars directly
+		beta<-lasso(X,y,gamma,lam2,rho,relaxpar,sselection)
+	} #else {
+		#FIXME; if no stability selection
+		#t <- (selprobpath!=0)
+		#beta <- rowMeans(t)
+		#beta[beta<thr.range[1]] <- 0
+		#print(paste("[admm]nnzero(beta)=", nnzero(beta), sep=""))
+		##X <- X[, which(beta>0)]
+		##y <- X %*% alpha[which(beta>0)]
+		##small <- solve((t(X)%*%X))%*%t(X)%*%y
+		##beta[beta>0] <- small
+	#}
+	
+	#if (savepath) {
+		#plot regularization or selection prob path
+	#	dev.new()
+	#	matplot(log10(lambdas), t(selprobpath), cex=1, pch=16, type="l", xaxt="n", xlim=c(log10(min_lam1), log10(max_lam1)), xlab ="lambda", ylab="Coeffs/Selection prob", main="Regularization path", cex.lab=1.25, cex.axis=1.25)
+		#Sys.sleep(0.5) 
+		#dev.off()
+	#}
+		
+	if (sselection) {
+		if(savepath)
+			return(list(beta=beta,sp=as.vector(sp),thr=thr,stop=stop,lambda=lambdas[ls],l=ls,selprobpath=selprobpath[, 1:ls]))
+		else
+			return(list(beta=beta,sp=as.vector(sp),thr=thr,stop=stop,lambda=lambdas[ls],l=ls))
+	} else {	
+		if (savepath)
+			return(list(beta=betas,thr=(-Inf),selprobpath=selprobpath))
+		else
+			return(list(beta=betas,thr=(-Inf)))
+	}	
+
+}	
+
+sss <- function(X,y,beta,lam1,lam2,rho,relaxpar,sselection,sampleNo,sampleSize) {
+	if (sselection) {
+		#subsets <- sapply(1:sampleNo, function(s) {sampleTPoints(rownames(X))})
+		#res <- sapply(1:sampleNo, function(index) {lasso(X[subsets[, index],],y,lambda,rho,relaxpar,sselection)})
+	} else {
+		res <- admm(X,y,beta,lam1,lam2,rho,relaxpar,sselection)
+	}
+	return(res)
+}
+
+admm <- function(A,b,init_x,lam1,lam2,rho,relaxpar,sselection) {
+	
+	n <- dim(A)[1]
+	p <- dim(A)[2]
+
+	###ADMM solver
+	
+	history <- list()
+	history$objval <- list()
+	history$r_norm <- list()
+	history$s_norm <- list()
+	history$eps_pri <- list()
+	history$eps_dual <- list()
+	
+	res_x <- vector("list", NCORES)
+
+	#initializations
+	ax_bar <- Matrix(numeric(n))
+	z <- Matrix(0, nrow=n, ncol=NCORES)
+	#z_bar <- Matrix(numeric(n))
+	u <- Matrix(numeric(n))
+
+	#warm start x
+	for (j in 1:NCORES) {
+		res_x[[j]]$x <- init_x[ ,j]
+		res_x[[j]]$ax_hat <- A[, ((j-1)*SSIZE+1):(j*SSIZE)] %*% res_x[[j]]$x
+		ax_bar <- ax_bar + res_x[[j]]$ax_hat
+    	}
+	ax_bar <- ax_bar / NCORES
+		
+	z_bar <- (b + rho*(ax_bar + u)) / (NCORES+rho)
+		
+	for (j in 1:NCORES) 
+		z[ , j] <- z_bar + res_x[[j]]$ax_hat - ax_bar	
+		
+    	u <- u + ax_bar - z_bar
+	
+	for (k in 1:MAX_ITER) {
+
+		#DEBUG
+		#print(paste("[lasso]ADMM iteration ",k,sep=""))
+		
+		#x update in parallel
+		res_x <- mclapply(1:NCORES, function(j) update_x(A[ ,((j-1)*SSIZE+1):(j*SSIZE)], lam1/rho, relaxpar, sselection, res_x[[j]]$ax_hat, ax_bar, z[ ,j], z_bar, u), mc.preschedule = FALSE, mc.cores = NCORES)
+		#print("length(res_x)")
+		#print(length(res_x))
+		#for (j in 1:NCORES) {
+		#	print(paste("j=",j,sep=""))
+		#	print(str(res_x[[j]]))
+		#}
+		
+		z_bar_old <- z_bar
+		ax_bar <- Matrix(numeric(n))
+		for (j in 1:NCORES) 
+			ax_bar <- ax_bar + res_x[[j]]$ax_hat
+		ax_bar <- ax_bar / NCORES
+		ax_bar_hat <- relaxpar*ax_bar + (1-relaxpar)*z_bar_old
+
+		#z update 
+		z_bar <- (b + rho*(ax_bar_hat + u)) / (NCORES+rho)
+		
+		z_old <- z
+		for (j in 1:NCORES) 
+			z[ , j] <- z_bar + res_x[[j]]$ax_hat - ax_bar #ax_bar_hat	
+		
+		#u update
+    		u <- u + ax_bar_hat - z_bar
+    		
+		#DEBUG
+		#print(paste("[lasso]norm(z_bar)=", sqrt(sum(z_bar^2)), ", norm(u)=", sqrt(sum(u^2)), sep=""))	
+		
+		#check stopping conditions
+		p <- 0; s <- 0; ep1 <- 0; ep2 <- 0; es <- 0
+		for (j in 1:NCORES) {
+			ax_hat <- res_x[[j]]$ax_hat
+			p <- p + sum((ax_hat - z[ ,j])^2)
+
+			Aj <- A[, ((j-1)*SSIZE+1):(j*SSIZE)]
+			s <- s + sum((-rho*crossprod(Aj, (z[ ,j]-z_old[ ,j])))^2)
+
+			ep1 <- ep1 + sum(ax_hat^2)
+			ep2 <- ep2 + sum(z[ ,j]^2)
+
+			es <- es + sum(crossprod(Aj, rho*u)^2)
+		}
+
+		#diagnostics, reporting, termination checks
+		history$objval[[k]] <- opt_obj(A,b,lam1,NCORES,res_x,z_bar)
+		#history$r_norm[[k]] <- sqrt(p)
+		history$r_norm[[k]] <- sqrt(NCORES) * sqrt(sum((z_bar - ax_bar)^2))
+		history$s_norm[[k]] <- sqrt(s)
+		history$eps_pri[[k]] <- sqrt(n) * ABSTOL + RELTOL * max(sqrt(ep1), sqrt(ep2))
+		history$eps_dual[[k]] <- sqrt(SSIZE) * ABSTOL + RELTOL * sqrt(es)
+		
+		if (QUIET==FALSE)  
+			print(paste("[admm]k=", k,", r_norm=", history$r_norm[[k]], ", eps_pri=", history$eps_pri[[k]], ", s_norm=", history$s_norm[[k]], ", eps_dual=", history$eps_dual[[k]], ", objval=", history$objval[[k]], sep=""))
+
+		if (history$r_norm[[k]]<history$eps_pri[[k]]&&history$s_norm[[k]]<history$eps_dual[[k]])
+        		break
+			 
+		#x update in parallel
+		#res_x <- mclapply(1:NCORES, function(j) update_x(A, j, lam1, rho, relax_par, sselection, res_x[[j]]$ax_hat, ax_bar, z[ ,j], z_bar, u), mc.preschedule = FALSE, mc.cores = NCORES)
+    		#print("length(res_x)")
+		#print(length(res_x))
+		#for (j in 1:NCORES) {
+		#	print(paste("j=",j,sep=""))
+		#	print(str(res_x[[j]]))
+		#}
+			
+	}#end for
+	print(paste("[admm]Num of ADMM iters ", k, sep=""))
+		
+	x <- res_x[[1]]$x
+	if (NCORES>1) 
+		for (j in 2:NCORES)
+			x <- cbind2(x, res_x[[j]]$x)
+		
+	#print("[admm]x[x!=0]")
+	#print(x[x!=0])
+	#print("[admm]length(x[x!=0])")
+	#print(length(x[x!=0]))
+
+	return(x)
+
+}#end lasso
+
+opt_obj <- function(A, b, lambda, N, x, z) {
+   
+   s_x <- 0
+   #s_z <- Matrix(numeric(n))
+   for (j in 1:N) {
+   	s_x <- s_x + sum(abs(x[[j]]$x))
+	#s_z <- s_z + z[, j]
+   }	
+   #obj <-  (1/2)*sum((s_z-b)^2) + lambda*s_x
+   obj <-  (1/2)*sum((N*z-b)^2) + lambda*s_x
+   
+   return(obj)		
+}
+
+update_x <- function(A, lam1, relaxpar, sselection, ax_hat, ax_bar, z, z_bar, u) {
+	
+	n <- dim(A)[1]
+	p <- dim(A)[2]
+	
+	#A <- A[ ,((j-1)*SSIZE+1):(j*SSIZE)]
+
+	b <- ax_hat + z_bar - ax_bar - u
+	#lam1 <- lam1 / (rho*n)
+	#lam1 <- lam1 / sqrt(p)
+
+	#Solve a lasso problem to find x
+	#print(paste("[update_x]Calling glmnet, j=", j,sep=""))
+	r <- glmnet(A, b, family="gaussian", nlambda=1, lambda=lam1/n, alpha=0.9, standardize=FALSE, intercept=FALSE)
+	#print(paste("[update_x]Done calling glmnet, j=", j,sep=""))
+	
+	x <- r$beta
+	#t <- (r$beta!=0)
+	#x <- Matrix(rowMeans(t))
+	#x <- x * rho
+	#x[x<0.6] <- 0
+	
+	#DEBUG
+	#print(paste("[update_x]norm(b)=", sqrt(sum(b^2)), ", norm(x)=", sqrt(sum(x^2)), sep=""))	
+	#print(paste("norm(x)=", sqrt(sum(x^2)),sep=""))
+	
+	ax <- A %*% x
+	#ax <- relaxpar*ax + (1 - relaxpar)*z
+
+	return(list(x=x, ax_hat=ax))
+}
+

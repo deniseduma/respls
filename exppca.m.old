@@ -1,0 +1,67 @@
+%function [U, V, M] =  exppca(algo, dist, X, k, initU, initS, initV)
+function [U, V, M] = exppca(algo, dist, varargin)
+    
+    fprintf('Total number of input arguments = %d\n',nargin);
+    
+    %output mat file to save important vars
+    outFile = strcat(algo, '_', dist, '_', 'saved.mat');
+    
+    X = varargin{1};
+    %types = varargin{2};
+    k = varargin{2};
+    initU = varargin{3};
+    initS = varargin{4};
+    initV = varargin{5};
+	
+    [n, d] = size(X);
+	
+    initM = zeros(n, 1);
+    
+    tol = 1e-1; 		
+    c=1; a1=1; a2=1; a3=0;
+    
+    %adding smoothness constraints
+    A = diag(ones(d-1,1), 1) + diag(ones(d-1,1), -1);
+    D = diag(A * ones(d,1));
+    L = D - A; 
+   
+    %rearrange U and V into vector form
+    initU = reshape(initU', k*n, 1);
+    initV = reshape(initV', k*d, 1);
+    
+    %plot objective function value at each iteration
+    figure('Name','Objective function','NumberTitle','off');
+    crt_axis=gca;
+    set(crt_axis,'XLim',[0 100]);
+    set(crt_axis,'XTick',[0:10:100]);
+    pause(0.03); hold on;
+
+    %measure elapsed time
+    tStart = tic;
+    
+    %call XPCA
+    if strcmp(algo, 'fminunc')
+    	[U, V, M, iter] = xpca(dist, X, initU, initV, initM, L, c, a1, a2, a3, tol, crt_axis);
+    elseif strcmp(algo, 'newton') 
+    	[U, V, M, iter] = xpca_newton(dist, X, initU, initV, initM, L, c, a1, a2, a3, tol, crt_axis);
+    end
+    
+    %measure elapsed time
+    tElapsed = toc(tStart);
+
+    %rearrange U and V back into original form
+    initU = (reshape(initU, k, n))';
+    initV = (reshape(initV, k, d))';
+    U = (reshape(U, k, n))';
+    V = (reshape(V, k, d))';
+
+    assert(rank(U)==k, 'Rank of U is not k!');
+    assert(rank(V)==k, 'Rank of V is not k!');
+   
+    %number of iterations and elapsed time	
+    fprintf('[exppca]Number of iterations %d\n', iter);
+    fprintf('[exppca]Time elapsed %.2f\n', tElapsed);
+    
+    %save(outFile, 'initU', 'initS', 'initV', 'U', 'V', 'M', 'iter', 'tElapsed');
+
+end

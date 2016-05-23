@@ -1,0 +1,127 @@
+library(MASS)
+library(Matrix)
+#library("spls")
+
+#functions taken from spls package
+source("ust.R")
+source("spls.R")
+source("correctp.R")
+source("spls.dv.R")
+
+runParallelSPLS <- function(sim,i,n,p,q,ncomp,ncomp1,C,V0,outdir) {
+	
+	cat("\n")
+	print(paste("Iteration ", i, sep=""))
+	
+	#Generate train and test X
+	X <- Matrix(mvrnorm(n, rep(0, p), C)) 
+	newX <- Matrix(mvrnorm(n, rep(0, p), C)) 
+	
+	#Generate Y
+	if (sim==1) {
+		Y <- Matrix(0,nrow=n,ncol=q) 
+		for (j in 1:ncomp) {
+			u <- X%*%V0[,j]	
+			Y <- Y + (1/ncomp)*u 
+		}	
+	} else if (sim==2) {
+		U <- X %*% V0
+		q1 = c(0.8, 0.2, 0) 
+		q2 = c(0.2, 0.8, 0)
+		# Batch effect modelling
+		#q1 = c(0.8, 0.2, 0) #main effect 
+		#q2 = c(0, 0.2, 0.8) #batch effect
+		Q = rbind(q1, q2)
+		Y <- U %*% t(Q) + mvrnorm(n, rep(0, q), Diagonal(q))
+	}
+	
+	# Measure execution time
+	start <- proc.time()
+
+	res <- spls(X, Y, ncomp1, eta=0.5, kappa=0.5, select="pls2", fit="simpls", scale.x=TRUE, scale.y=TRUE, eps=1e-4, maxstep=100, trace=FALSE)
+
+	# Measure execution time
+	elapsed <- proc.time() - start
+			
+	ws <- res$ws
+	betapls <- res$betahat
+	
+	# Normalize direction vectors 
+	for (j in 1:ncomp1) 
+		ws[[j]] <- ws[[j]]/sqrt(sum(ws[[j]]^2))
+
+	# Prediction
+	predY <- spls::predict.spls( res, newX, type = "fit")
+
+	# Mean squared prediction error
+	mspe <- sum((Y - predY)^2) / n
+	
+	# TPR and FPR
+	tp2 = numeric(ncomp)
+	fp2 = numeric(ncomp)
+	tn2 = numeric(ncomp)
+	fn2 = numeric(ncomp)
+	
+	tpr2 = numeric(ncomp)
+	fpr2 = numeric(ncomp)
+	
+	# Total FPR across PCs
+	t_fpr = 0
+
+	best_match = numeric(ncomp)
+	V_hat2 = Matrix(0,p,ncomp)	
+	for (j in 1:ncomp) {
+		min_j = 1
+		min_ang = 1e3
+		print(paste("j=",j,sep=""))
+		for (j2 in 1:ncomp1) { 
+			ang = acos( crossprod(V0[, j], ws[[j2]]) )
+			if (ang<min_ang) { 
+				min_ang = ang
+				min_j = j2				
+			}
+		}
+			
+		#DEBUG
+		print(paste("[runParallelSPLS]iter=",i,", j=",j,", min_j=",min_j,", min_ang=",min_ang,sep=""))
+		
+		best_match[j] <- min_j
+		V_hat2[, j] <-  ws[[min_j]]
+	}
+	
+	# Were components correctly split?
+	csplit <- 0
+	if (length(best_match)==length(unique(best_match)))
+		csplit <- 1
+	
+	####TPR AND FPR####	
+	for (j in 1:ncomp) {
+		tp2[j] = sum(V0[,j] & V_hat2[,j])
+		fn2[j] = sum(V0[,j]!=0) - tp2[j]
+		fp2[j] = sum((!V0[,j]) & V_hat2[,j])
+		tn2[j] = sum(!V0[,j]) - fp2[j]
+		tpr2[j] = tp2[j]/(tp2[j]+fn2[j])
+		fpr2[j] = fp2[j]/(fp2[j]+tn2[j])
+	}	
+	
+	# Total FPR
+	v0 <- V0[,1]		
+	for (j in 2:ncomp) {
+		v0 <- v0 | V0[,j]
+	}
+	#print("v0")
+	#print(which(v0!=0))
+	w <- ws[[1]]	
+	for (j in 2:ncomp1) {
+		w <- w | ws[[j]]
+	}
+	#print("w")
+	#print(which(w!=0))
+	t_fp = sum((!v0) & w)
+	t_tn = sum(!v0) - t_fp
+	t_fpr = t_fp/(t_fp+t_tn)
+	
+	res <- list(elapsed=elapsed,mspe=mspe,tpr2=tpr2,fpr2=fpr2,t_fpr=t_fpr,csplit=csplit)
+	return(res)
+}
+

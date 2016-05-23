@@ -1,0 +1,119 @@
+  function [U, S, V] = cc_wrapper(X, cname, vname, method, dist, algo, k)
+  
+  %[initU, initS, initV] = svds(X, k);
+  [initU, initS, initV] = svds(log(1 + X), k);
+
+  %return values
+  U = initU; S = initS; V = initV;
+
+  assert(rank(initU)==k, 'rank(initU) is not k!');
+  assert(rank(initV)==k, 'rank(initV) is not k!');
+  
+  comps = [];
+  for i=1:k
+	comps = [comps; int2str(i)];
+  end
+  vname2 = strvcat('ID', comps);
+
+  if (strcmp(method, 'svd')) %SVD
+  	disp('***SVD method***');
+
+  	initU = initU * initS;
+	
+	plotScatter(initU, k, colors, 'SVD(X)')  
+  	%initU_T = plotDendrogram(initU, k, 'initU');
+  	
+	%k-means clustering
+	%kmeansopt = statset('kmeans');
+	%kmeansopt.replicates = 10;
+	%initU_T = kmeans(initU, k, 'options', kmeansopt);
+	%initU_T = kmeans(initU, k, 'Replicates', 1000);
+
+	%write matrix to file
+  	%writeCSV(initU, cname, vname2, 'initU');
+  	%writeCSV(initU_T, cname, strvcat('ID', 'Cluster'), 'initU_T');
+	      
+   elseif (strcmp(method, 'mds')) %MDS
+  	disp('***MDS method***');
+   	
+	%D = pdist(X, 'euclidean');
+   	D = pdist(log(1 + X), 'euclidean');
+	[Y, eigvals] = cmdscale(D);
+	
+	Y = Y(:, 1:k);
+
+	plotScatter(Y, k, colors, 'MDS(X)');
+   	%Y_T = plotDendrogram(Y, k, 'Y');
+   
+	%k-means clustering
+	%Y_T = kmeans(Y, k, 'Replicates', 1000);
+   	
+	%write matrix to file
+   	%writeCSV(Y, cname, vname2, 'Y');
+   	%writeCSV(Y_T, cname, strvcat('ID', 'Cluster'), 'Y_T');
+   	
+ elseif (strcmp(method, 'nmf')) %NMF
+  	disp('***NMF method***');
+	
+	%read NMF factorization from file (done in R)
+  	inFile2 = '../data/cc_regeneration_nmf.txt'
+	[Z, vnameZ, cnameZ] = tblread(inFile2, ',');
+	
+	%DEBUG
+	for i=1:length(cname)
+		assert(strcmp(cnameZ(i), cname(i)), 'Patient ids in different order!');
+	end
+
+	plotScatter(Z, k, colors, 'NMF(X)')  
+  	%Z_T = plotDendrogram(Z, k, 'Z');
+  	
+	%Z_T = kmeans(Z, k, 'Replicates', 1000);
+
+	%write matrix to file
+  	%writeCSV(Z, cname, vname2, 'Z');
+  	%writeCSV(Z_T, cname, strvcat('ID', 'Cluster'), 'Z_T');
+
+   elseif (strcmp(method, 'xpca')) %XPCA
+  	disp('***XPCA method***');
+   	
+  	%initU = initU * initS;
+	
+	%plot the histogram of X values
+   	figure('Name','Histogram of X','NumberTitle','off');
+   	hist(X, 20);
+   	pause(1);
+
+   	%call exppca
+   	%first param is algo, either 'fminunc' or 'newton'
+   	%[U, V, M] = exppca(algo, dist, X, ctypes, k, initU, initS, initV);
+   	[U, V, M] = exppca(algo, dist, X, k, initU, initS, initV);
+
+   	% norm U
+	UN = normc(U);
+	normColU = sqrt(diag(U' * U));
+	D_U = diag(normColU);
+	% norm V
+	VN = normc(V);
+	normColV = sqrt(diag(V' * V));
+	D_V = diag(normColV);
+	% new U
+	U = UN * D_U * D_V;
+	% new V
+	%V = VN * D_U * D_V;
+	
+	%principal components scatter plot	
+   	plotScatter(U, k, 'XPCA(X)');
+   	%U_T = plotDendrogram(U, k, 'U');
+   
+	%k-means clustering
+	%U_T = kmeans(U, k, 'Replicates', 1000);
+   	
+	%write matrix to file
+   	writeCSV(U, cname, vname2, 'U');
+   	%writeCSV(U_T, cname, strvcat('ID', 'Cluster'), 'U_T');
+   
+   end
+   
+end
+
+

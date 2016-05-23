@@ -1,0 +1,191 @@
+#!/usr/bin/Rscript
+
+rm(list=ls())
+setwd(".")
+print(getwd())
+
+source("ss4.r")
+
+library(MASS)
+library(caret)
+library(glmnet)
+library(Matrix)
+library(gplots)
+library(multicore)
+library(elasticnet)
+
+args=commandArgs(TRUE)
+#type = "c"#args[1]
+myncomp = 6#as.integer(args[2])
+nOmit = 8 #as.integer(args[3])
+noRuns = 1000 #as.integer(args[4])
+noSteps = 20
+threshold = 0.8#threshold for stability selection 
+
+##Measure execution time
+start = proc.time()
+
+## read cc
+regen_cc = read.table(paste("../data/cc_regen.csv", sep = ""), sep=",", header=T, row.names=1)
+apoints_cc = readLines(paste("../data/cc_timepoints.txt", sep=""))
+cpoints_cc = readLines(paste("../data/cc_timepoints_c.txt", sep=""))
+tpoints_cc = readLines(paste("../data/cc_timepoints_t.txt", sep=""))
+colnames(regen_cc) = apoints_cc
+
+## read uu
+regen_uu = read.table(paste("../data/uu_regen.csv", sep = ""), sep=",", header=T, row.names=1)
+apoints_uu = readLines(paste("../data/uu_timepoints.txt", sep=""))
+cpoints_uu = readLines(paste("../data/uu_timepoints_c.txt", sep=""))
+tpoints_uu = readLines(paste("../data/uu_timepoints_t.txt", sep=""))
+colnames(regen_uu) = apoints_uu
+
+regen_cc = as.matrix(regen_cc)
+regen_uu = as.matrix(regen_uu)
+
+geneSubset = readLines("../data/inter_by_both.txt")
+
+regen_cc = regen_cc[geneSubset, ]
+regen_uu = regen_uu[geneSubset, ]
+print("dim(regen_cc)")
+print(dim(regen_cc))
+print("dim(regen_uu)")
+print(dim(regen_uu))
+
+regen_big = cbind(regen_cc, regen_uu)
+regen_big = t(regen_big)
+print("dim(regen_big)")
+print(dim(regen_big))
+
+genes = colnames(regen_big)
+
+regen_t =  regen_big[which(rownames(regen_big) %in% c(tpoints_cc)), ]
+regen_c =  regen_big[which(rownames(regen_big) %in% c(cpoints_cc)), ]
+
+regen_t = scale(regen_t, center=TRUE, scale = FALSE)
+regen_c = scale(regen_c, center=TRUE, scale = FALSE)
+#regen_t = regen_t / norm(regen_t, type = "F")
+#regen_c = regen_c / norm(regen_c, type = "F")
+print("dim(regen_t)")
+print(dim(regen_t))
+print("dim(regen_c)")
+print(dim(regen_c))
+
+var_t = apply(regen_t, 2, var)
+var_c = apply(regen_c, 2, var)
+z_t = which(var_t==0)
+z_c = which(var_c==0)
+print("z_t")
+print(length(z_t))
+print("z_c")
+print(length(z_c))
+
+
+#join treated and control samples
+regen = cbind(regen_t, regen_c)
+print("dim(regen)")
+print(dim(regen))
+
+dim = dim(regen)
+n = dim[1]
+p = dim[2]
+
+dim = dim(regen_t)
+#n = dim[1]
+p1 = dim[2]
+
+dim = dim(regen_c)
+#n = dim[1]
+p2 = dim[2]
+
+##SVD
+rpcs_t = svd(regen_t)
+totalVar = sum((rpcs_t$d)^2)
+print("rpcs_t pev")
+print((rpcs_t$d)^2/totalVar)
+rpcs_c = svd(regen_c)
+totalVar = sum((rpcs_c$d)^2)
+print("rpcs_c pev")
+print((rpcs_c$d)^2/totalVar)
+rpcs = svd(regen)
+totalVar = sum((rpcs$d)^2)
+print("rpcs pev")
+print((rpcs$d)^2/totalVar)
+
+
+##Pick a lambda for each PC from the reg path of LARS-EN
+#lambda_t = rep(0, myncomp)
+#lambda_c = rep(0, myncomp)
+#lambda = rep(0, myncomp)
+#for (i in 1:myncomp) {
+#	cat("\n")
+#	print(paste("Treated PC", i,sep=""))
+#	pc = scale(rpcs_t$u[, i] * rpcs_t$d[i], center=TRUE, scale = FALSE)
+#	lambda_t[i] = stabilityselection4(regen_t, pc, nbootstrap = 1000, noSteps, r_alpha=1, plotme=TRUE, threshold) 
+#	
+#	cat("\n")
+#	print(paste("Control PC", i,sep=""))
+#	pc = scale(rpcs_c$u[, i] * rpcs_c$d[i], center=TRUE, scale = FALSE)
+#	lambda_c[i] = stabilityselection4(regen_c, pc, nbootstrap = 1000, noSteps, r_alpha=1, plotme=TRUE, threshold)
+#	#lambda[i] = min(min_t, min_c)
+#	
+#	cat("\n")
+#	print(paste("Full PC", i,sep=""))
+#	pc = scale(rpcs$u[, i] * rpcs$d[i], center=TRUE, scale = FALSE)
+#	lambda[i] = stabilityselection4(regen, pc, nbootstrap = 1000, noSteps, r_alpha=1, plotme=TRUE, threshold) 
+#}
+lambda_t = c(0.002104, 0.001327, 0.001211, 0.001730, 0.004298, 0.003277)
+lambda_c = c(0.001265, 0.001817, 0.001152, 0.001823, 0.002765, 0.003923)
+lambda = c(0.141085, 0.013148, 0.015944, 0.001166, 0.001557, 0.001442)
+
+
+oldV = matrix(0, p1 + p2, myncomp) 
+oldV_t = matrix(0, p1, myncomp) 
+oldV_c = matrix(0, p2, myncomp) 
+
+iter = 0
+#Joint SPCA
+while (TRUE) {
+	iter = iter + 1
+	print(paste("iter ", iter, sep=""))
+	
+	#SPCA of joint 
+	spcs=arrayspc(regen, K=myncomp, para = lambda, max.iter = 200)
+	#print("spcs$loadings")
+	#print(spcs$loadings[1:100, ])
+	#print(dim(spcs$loadings))
+	
+	U = regen %*% spcs$loadings
+	
+	#SPCA of treated
+	new_regen_t = regen_t -  U %*% t(spcs$loadings[1:p1, ])
+	new_regen_t = new_regen_t - U %*% (solve(t(U) %*% U) %*% (t(U) %*% new_regen_t))
+	spcs_t=arrayspc(new_regen_t, K=myncomp, para = lambda_t, max.iter = 200)
+	
+	U_t = new_regen_t %*% spcs_t$loadings
+
+	#SPCA of control
+	new_regen_c = regen_c -  U %*% t(spcs$loadings[(p1 + 1):(p1 + p2), ])
+	new_regen_c = new_regen_c - U %*% (solve(t(U) %*% U) %*% (t(U) %*% new_regen_c))
+	spcs_c=arrayspc(new_regen_c, K=myncomp, para = lambda_c, max.iter = 200)
+
+	U_c = new_regen_c %*% spcs_c$loadings
+	
+	regen_t = regen_t - U_t %*% t(spcs_t$loadings)
+	regen_c = regen_c - U_c %*% t(spcs_c$loadings)
+	regen = cbind(regen_t, regen_c)
+
+	norm = norm(spcs$loadings - oldV, type="F")
+	norm_t = norm(spcs_t$loadings - oldV_t, type="F")
+	norm_c = norm(spcs_c$loadings - oldV_c, type="F")
+	if (norm(spcs$loadings - oldV, type="F") <1e-6 & norm(spcs_t$loadings - oldV_t , type="F") <1e-6 & norm(spcs_c$loadings - oldV_c, type = "F") <1e-6) 
+		break;
+
+	old_V = spcs$loadings
+	oldV_t = spcs_t$loadings
+	oldV_c = spcs_c$loadings
+}
+
+#Measure execution time
+cat("\nExecution time")
+print(proc.time() - start)
+

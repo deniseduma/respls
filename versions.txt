@@ -1,0 +1,20 @@
+
+#ver 2 
+#nscumcomp, myncomp =5, noOmit = 10, gamma = 1e4
+#ver 3 
+#nscumcomp, myncomp =6, noOmit = 10, gamma = 1e4
+#ver 4
+#nsprcomp, k = 100, nOmit = 16
+ver 5
+nscumcomp, myncomp = 6, noOmit = 16, gamma = 1e6
+ver 6
+nscumcomp, myncomp = 8, noOmit = 16, gamma = 1e6
+ver 7
+nscumcomp, myncomp = 10, noOmit = 16, gamma = 1e6
+ver 8
+nscumcomp, myncomp = 16, noOmit = 16, gamma = 1e6
+
+ver 9
+spca, myncomp = 6, noOmit = 16
+ver 10
+spca, myncomp = 8, noOmit = 16
